@@ -52,8 +52,6 @@ This project presents a comprehensive bioinformatics pipeline for analyzing RNA-
 
 ## 🔬 Methodology
 
-## 🔬 Methodology
-
 1. **Data Retrieval** — Downloaded TCGA-BRCA RNA-seq counts via TCGAbiolinks
 2. **Preprocessing** — Filtered low-expression genes (count ≥ 10 in at least 10 samples)
 3. **Differential Expression** — DESeq2 analysis with padj < 0.05 and |Log2FC| > 1
