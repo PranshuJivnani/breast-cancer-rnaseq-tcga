@@ -1,0 +1,607 @@
+---
+title: "Breast Cancer RNA-seq Analysis"
+author: "S3490964_PRANSHU_JIVNANI"
+date: "2026-03-12"
+output: html_document
+---
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(dplyr)
+library(ggplot2)
+```
+
+# Query TCGA-BRCA data 
+  We query TCGA-BRCA RNA-seq count data for primary tumor and normal breast tissue samples.
+  
+```{r query_tcga}
+query <- GDCquery(
+  project = "TCGA-BRCA",
+  data.category = "Transcriptome Profiling",
+  data.type = "Gene Expression Quantification",
+  workflow.type = "STAR - Counts",
+  sample.type = c("Primary Tumor", "Solid Tissue Normal")
+)
+
+query
+```
+  
+# Download TCGA-BRCA data
+
+We now download the TCGA-BRCA RNA-seq files returned by the query into the raw data folder of the project.
+
+```{r download_tcga}
+GDCdownload(
+  query = query,
+  method = "api",
+  directory = "data_raw",
+  files.per.chunk = 20
+)
+```
+
+# Check downloaded files
+
+Before preparing the TCGA object, we verify that files were downloaded into the raw data folder.
+
+```{r check_download}
+list.files("data_raw", recursive = TRUE)[1:20]
+length(list.files("data_raw", recursive = TRUE))
+```
+
+```{r check_tar_files}
+list.files("data_raw", pattern = "\\.tar\\.gz$", recursive = TRUE)
+```
+
+# Prepare TCGA-BRCA expression object
+
+We now convert the downloaded TCGA files into a single R object containing gene expression data and sample metadata.
+
+```{r prepare_tcga}
+brca_se <- GDCprepare(
+  query = query,
+  directory = "data_raw"
+)
+
+brca_se
+```
+# Save processed TCGA object
+
+We save the processed TCGA-BRCA object so it can be reused without repeating the download step.
+
+```{r save_object}
+saveRDS(brca_se, file = "../data_processed/brca_se.rds")
+```
+
+# Check sample groups
+
+We now inspect the sample metadata to confirm the number of tumor and normal samples in the TCGA-BRCA dataset.
+
+```{r check_sample_groups}
+table(brca_se$shortLetterCode)
+```
+
+# Extract expression matrix and metadata
+
+We now extract the raw count matrix and the sample metadata from the TCGA-BRCA object for downstream analysis.
+
+```{r extract_counts_metadata}
+count_matrix <- assay(brca_se, "unstranded")
+sample_metadata <- as.data.frame(colData(brca_se))
+
+dim(count_matrix)
+dim(sample_metadata)
+```
+
+# Confirm sample order
+
+We verify that the sample names in the count matrix match the sample names in the metadata table.
+
+```{r check_sample_order}
+identical(colnames(count_matrix), rownames(sample_metadata))
+```
+# Create analysis group labels
+
+We create a simple analysis group variable that labels samples as Tumor or Normal for downstream comparison.
+
+```{r create_group_labels}
+sample_metadata$group <- ifelse(sample_metadata$shortLetterCode == "TP", "Tumor", "Normal")
+
+table(sample_metadata$group)
+```
+
+# Filter low-count genes
+
+We remove genes with very low counts across samples, because such genes usually add noise and are not informative for differential expression analysis.
+
+```{r filter_low_counts}
+keep_genes <- rowSums(count_matrix >= 10) >= 10
+filtered_counts <- count_matrix[keep_genes, ]
+
+dim(count_matrix)
+dim(filtered_counts)
+```
+
+# Save filtered data
+
+We save the filtered count matrix and the sample metadata so that the project can be resumed without repeating earlier processing steps.
+
+```{r save_filtered_data}
+saveRDS(filtered_counts, file = "../data_processed/filtered_counts.rds")
+saveRDS(sample_metadata, file = "../data_processed/sample_metadata.rds")
+```
+
+# Create DESeq2 dataset
+
+We now create a DESeq2 dataset object using the filtered count matrix and the tumor-versus-normal group labels. This object will be used for differential expression analysis.
+
+```{r create_deseq_dataset}
+library(DESeq2)
+
+dds <- DESeqDataSetFromMatrix(
+  countData = filtered_counts,
+  colData = sample_metadata,
+  design = ~ group
+)
+
+dds
+```
+
+# Run DESeq2 analysis
+
+We now run the DESeq2 workflow to estimate size factors, normalize counts, and fit the statistical model for differential expression between tumor and normal samples.
+
+```{r run_deseq}
+dds <- DESeq(dds)
+```
+
+# Extract differential expression results
+
+We now extract the differential expression results from DESeq2 to identify genes that differ between tumor and normal breast tissue.
+
+```{r extract_results}
+res <- results(dds, contrast = c("group", "Tumor", "Normal"))
+res
+```
+
+# Identify significant genes
+
+We count genes that show significant differential expression between tumor and normal tissue.
+
+```{r count_significant}
+sig_genes <- res[which(res$padj < 0.05), ]
+
+nrow(sig_genes)
+```
+
+# Apply a stricter significance filter
+
+We now apply a stricter filter to identify genes that are not only statistically significant but also show a meaningful change in expression between tumor and normal tissue.
+
+```{r strict_significant}
+sig_genes_strict <- res[which(res$padj < 0.05 & abs(res$log2FoldChange) > 1), ]
+
+nrow(sig_genes_strict)
+```
+
+# Save differential expression results
+
+We save the full differential expression results and the stricter significant gene set for later interpretation and visualization.
+
+```{r save_results}
+res_df <- as.data.frame(res)
+sig_genes_strict_df <- as.data.frame(sig_genes_strict)
+
+write.csv(res_df, file = "../results/deseq2_results_full.csv")
+write.csv(sig_genes_strict_df, file = "../results/deseq2_results_strict.csv")
+```
+
+# Volcano plot
+
+We create a volcano plot to visualize which genes are significantly upregulated or downregulated between tumor and normal breast tissue.
+
+```{r volcano_plot}
+volcano_df <- as.data.frame(res)
+volcano_df$gene <- rownames(volcano_df)
+
+volcano_df$category <- "Not Significant"
+volcano_df$category[volcano_df$padj < 0.05 & volcano_df$log2FoldChange > 1] <- "Upregulated"
+volcano_df$category[volcano_df$padj < 0.05 & volcano_df$log2FoldChange < -1] <- "Downregulated"
+
+ggplot(volcano_df, aes(x = log2FoldChange, y = -log10(padj), color = category)) +
+  geom_point(alpha = 0.6, size = 1.2) +
+  theme_minimal() +
+  labs(
+    title = "Volcano Plot: Tumor vs Normal",
+    x = "Log2 Fold Change",
+    y = "-Log10 Adjusted P-value"
+  )
+```
+
+# Save volcano plot
+
+We save the volcano plot for inclusion in the final report.
+
+```{r save_volcano}
+volcano_df <- as.data.frame(res)
+volcano_df$gene <- rownames(volcano_df)
+volcano_df <- volcano_df[!is.na(volcano_df$padj), ]
+
+volcano_df$category <- "Not Significant"
+volcano_df$category[volcano_df$padj < 0.05 & volcano_df$log2FoldChange > 1] <- "Upregulated"
+volcano_df$category[volcano_df$padj < 0.05 & volcano_df$log2FoldChange < -1] <- "Downregulated"
+
+p <- ggplot(volcano_df, aes(x = log2FoldChange, y = -log10(padj), color = category)) +
+  geom_point(alpha = 0.6, size = 1.2) +
+  theme_minimal() +
+  labs(
+    title = "Volcano Plot: Tumor vs Normal",
+    x = "Log2 Fold Change",
+    y = "-Log10 Adjusted P-value"
+  )
+
+print(p)
+
+ggsave(
+  filename = "../figures/volcano_plot.png",
+  plot = p,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+```
+
+# Top differentially expressed genes
+
+We identify the top 20 most significant differentially expressed genes based on adjusted p-value.
+
+```{r top20_genes}
+res_df <- as.data.frame(res)
+res_df$gene_id <- rownames(res_df)
+
+top20_genes <- res_df[order(res_df$padj), ][1:20, ]
+
+top20_genes[, c("gene_id", "log2FoldChange", "padj")]
+```
+
+# Inspect gene annotation columns
+
+We inspect the gene annotation columns available in the TCGA object so that we can identify the correct column containing gene symbols.
+
+```{r inspect_gene_info}
+gene_info <- as.data.frame(rowData(brca_se))
+colnames(gene_info)
+```
+
+# Add gene symbols
+
+We map Ensembl gene IDs to gene symbols using the gene_name column from the TCGA annotation data.
+
+```{r add_gene_symbols}
+gene_info_subset <- gene_info[, c("gene_id", "gene_name")]
+colnames(gene_info_subset) <- c("gene_id", "gene_symbol")
+
+top20_genes_annotated <- merge(top20_genes, gene_info_subset, by = "gene_id")
+
+top20_genes_annotated[, c("gene_symbol", "log2FoldChange", "padj")]
+```
+# Save top annotated genes
+
+We save the top 20 annotated differentially expressed genes for later interpretation and reporting.
+
+```{r save_top20}
+write.csv(
+  top20_genes_annotated,
+  file = "../results/top20_genes_annotated.csv",
+  row.names = FALSE
+)
+```
+
+# Top upregulated and downregulated genes
+
+We separate the most strongly upregulated and downregulated genes to better interpret expression changes in breast cancer.
+
+```{r top_up_down_genes}
+top_upregulated <- res_df[order(-res_df$log2FoldChange), ][1:10, ]
+top_downregulated <- res_df[order(res_df$log2FoldChange), ][1:10, ]
+
+top_upregulated <- merge(top_upregulated, gene_info_subset, by = "gene_id")
+top_downregulated <- merge(top_downregulated, gene_info_subset, by = "gene_id")
+
+top_upregulated[, c("gene_symbol", "log2FoldChange", "padj")]
+top_downregulated[, c("gene_symbol", "log2FoldChange", "padj")]
+```
+
+# Save upregulated and downregulated genes
+
+We save the top upregulated and downregulated genes identified from the differential expression analysis.
+
+```{r save_up_down}
+write.csv(
+  top_upregulated,
+  file = "../results/top10_upregulated_genes.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  top_downregulated,
+  file = "../results/top10_downregulated_genes.csv",
+  row.names = FALSE
+)
+```
+
+# Pathway enrichment analysis
+
+We now perform pathway enrichment analysis to identify biological processes associated with the differentially expressed genes in breast cancer.
+
+```{r load_enrichment_packages}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+```
+
+# Prepare significant gene list for enrichment
+
+We extract the significant genes and map them to gene symbols so that they can be used for pathway enrichment analysis.
+
+```{r prepare_gene_list}
+sig_genes_strict_df$gene_id <- rownames(sig_genes_strict_df)
+
+sig_gene_symbols <- merge(
+  sig_genes_strict_df,
+  gene_info_subset,
+  by = "gene_id"
+)
+
+sig_gene_symbols <- sig_gene_symbols$gene_symbol
+sig_gene_symbols <- unique(sig_gene_symbols)
+
+length(sig_gene_symbols)
+head(sig_gene_symbols)
+```
+
+# Gene Ontology enrichment analysis
+
+We perform Gene Ontology Biological Process enrichment analysis to identify biological processes overrepresented among the significantly differentially expressed genes in breast cancer.
+
+```{r go_enrichment}
+ego_bp <- enrichGO(
+  gene = sig_gene_symbols,
+  OrgDb = org.Hs.eg.db,
+  keyType = "SYMBOL",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+head(as.data.frame(ego_bp))
+```
+
+# Visualization of enriched biological processes
+
+We visualize the top enriched Gene Ontology biological processes using a dot plot.
+
+```{r go_dotplot}
+dotplot(ego_bp, showCategory = 15) +
+  ggtitle("Top Enriched Biological Processes in Breast Cancer")
+```
+
+# Principal Component Analysis (PCA)
+
+We perform principal component analysis to visualize overall variation in the dataset and assess whether tumor and normal samples separate based on their expression profiles.
+
+```{r pca_plot, fig.width=8, fig.height=6}
+vsd <- vst(dds, blind = FALSE)
+
+pca_data <- plotPCA(vsd, intgroup = "group", returnData = TRUE)
+percentVar <- round(100 * attr(pca_data, "percentVar"))
+
+p_pca <- ggplot(pca_data, aes(PC1, PC2, color = group)) +
+  geom_point(size = 2, alpha = 0.8) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("PCA Plot: Tumor vs Normal") +
+  theme_minimal()
+
+print(p_pca)
+```
+
+# Heatmap of top differentially expressed genes
+
+We visualize expression patterns of the top differentially expressed genes using a heatmap to observe clustering patterns between tumor and normal samples.
+
+```{r heatmap_top_genes, fig.width=8, fig.height=8}
+library(pheatmap)
+
+top50 <- res_df[order(res_df$padj), ][1:50, ]
+top50_ids <- top50$gene_id
+
+heatmap_matrix <- assay(vsd)[top50_ids, ]
+
+annotation_col <- data.frame(
+  Group = sample_metadata$group
+)
+
+rownames(annotation_col) <- colnames(heatmap_matrix)
+
+pheatmap(
+  heatmap_matrix,
+  show_rownames = FALSE,
+  annotation_col = annotation_col,
+  scale = "row",
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "correlation",
+  main = "Heatmap of Top 50 Differentially Expressed Genes"
+)
+```
+
+# Machine Learning Dataset Preparation
+
+We prepare a machine learning dataset using the top differentially expressed genes as features to classify tumor and normal samples.
+
+```{r prepare_ml_data}
+library(caret)
+
+top100 <- res_df[order(res_df$padj), ][1:100, ]
+top100_ids <- top100$gene_id
+
+ml_matrix <- t(assay(vsd)[top100_ids, ])
+
+ml_data <- as.data.frame(ml_matrix)
+ml_data$group <- sample_metadata$group
+
+dim(ml_data)
+head(ml_data[, 1:6])
+```
+
+# Split data for machine learning
+
+We split the dataset into training and test sets so that the classifier can be trained on one subset and evaluated on unseen data.
+
+```{r split_ml_data}
+set.seed(123)
+
+train_index <- createDataPartition(ml_data$group, p = 0.7, list = FALSE)
+
+train_data <- ml_data[train_index, ]
+test_data  <- ml_data[-train_index, ]
+
+dim(train_data)
+dim(test_data)
+table(train_data$group)
+table(test_data$group)
+```
+
+# Random Forest classifier
+
+We train a Random Forest machine learning model to classify tumor and normal samples using gene expression features.
+
+# Convert outcome to factor
+
+We convert the response variable to a factor so that Random Forest performs classification rather than regression.
+
+```{r convert_group_factor}
+train_data$group <- as.factor(train_data$group)
+test_data$group  <- as.factor(test_data$group)
+
+str(train_data$group)
+```
+
+```{r setup_packages}
+if (!requireNamespace("randomForest", quietly = TRUE)) {
+  install.packages("randomForest", repos = "https://cloud.r-project.org")
+}
+library(randomForest)
+```
+
+# Train Random Forest classifier
+
+We now train the Random Forest classifier using the training dataset after converting the response variable to a factor.
+
+```{r train_random_forest_fixed}
+rf_model <- randomForest(
+  group ~ .,
+  data = train_data,
+  ntree = 500,
+  importance = TRUE
+)
+
+rf_model
+```
+
+# Model evaluation on test dataset
+
+We evaluate the trained Random Forest classifier on the independent test dataset to assess predictive performance.
+
+```{r evaluate_model}
+rf_predictions <- predict(rf_model, newdata = test_data)
+
+confusionMatrix(rf_predictions, test_data$group)
+```
+
+# Important genes from the Random Forest model
+
+We examine variable importance from the Random Forest classifier to identify genes that contribute most to distinguishing tumor and normal samples.
+
+```{r rf_importance}
+importance_scores <- importance(rf_model)
+
+importance_df <- data.frame(
+  gene = rownames(importance_scores),
+  importance = importance_scores[, "MeanDecreaseGini"]
+)
+
+top_ml_genes <- importance_df[order(-importance_df$importance), ][1:20, ]
+
+top_ml_genes
+```
+
+# Machine learning–identified biomarker genes
+
+We extracted the most important features from the Random Forest classifier.  
+These genes contribute the most to distinguishing tumor and normal samples and may represent potential biomarkers or therapeutic targets.
+
+```{r annotate_ml_genes}
+
+ml_gene_info <- gene_info[, c("gene_id", "gene_name")]
+colnames(ml_gene_info) <- c("gene", "gene_symbol")
+
+top_ml_genes_annotated <- merge(top_ml_genes, ml_gene_info, by = "gene")
+
+top_ml_genes_annotated[, c("gene_symbol", "importance")]
+
+```
+
+# Machine learning biomarker genes
+
+We visualized the most important genes identified by the Random Forest classifier.  
+These genes contribute most strongly to distinguishing tumor and normal breast tissue samples.
+
+```{r plot_ml_importance}
+
+library(ggplot2)
+
+top_ml_genes_plot <- top_ml_genes_annotated[order(top_ml_genes_annotated$importance, decreasing = TRUE), ]
+
+ggplot(top_ml_genes_plot[1:15, ], aes(x = reorder(gene_symbol, importance), y = importance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Top Machine Learning Biomarker Genes",
+    x = "Gene",
+    y = "Importance (Random Forest)"
+  )
+
+```
+```{r save_ml_plot}
+
+ggsave(
+  "../figures/ml_gene_importance.png",
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+```
+
+# Candidate Therapeutic Targets in Breast Cancer
+
+We integrated differential expression analysis, pathway enrichment results, and machine learning feature importance to identify candidate biomarker genes and potential therapeutic targets.
+
+Several genes consistently appeared among the most significant features distinguishing tumor and normal samples. Notably, genes such as **MMP11, AURKA, NEK2, COL10A1, and CAV1** showed strong differential expression and high importance in the Random Forest classifier.
+
+These genes are involved in biological processes relevant to cancer progression, including extracellular matrix remodeling, cell cycle regulation, and mitotic signaling.
+
+For example:
+
+- **MMP11** is a matrix metalloproteinase associated with tumor invasion and metastasis through extracellular matrix degradation.
+- **AURKA (Aurora kinase A)** plays a critical role in mitotic spindle formation and has been widely studied as a therapeutic target in breast cancer.
+- **NEK2** is a serine/threonine kinase involved in centrosome separation and chromosome segregation, frequently overexpressed in aggressive tumors.
+- **COL10A1** is associated with extracellular matrix remodeling and has been reported as a biomarker in several cancers.
+- **CAV1 (Caveolin-1)** is involved in cell signaling and tumor microenvironment regulation.
+
+Together, these results highlight several candidate genes that may serve as potential biomarkers or therapeutic targets in breast cancer. Further experimental validation would be required to confirm their functional roles and clinical utility.
+
