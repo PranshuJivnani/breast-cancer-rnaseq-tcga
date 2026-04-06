@@ -1,4 +1,4 @@
-# breast-cancer-rnaseq-tcga
+# Breast-Cancer-RNAseq-TCGA
 Integrative Transcriptomic and Machine Learning Analysis of Breast Cancer Using TCGA RNA-seq Data
 # Integrative Transcriptomic and Machine Learning Analysis of Breast Cancer Using TCGA RNA-seq Data
 
